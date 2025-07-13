@@ -1,20 +1,7 @@
 #!/usr/bin/env -S uv run --script
 
-# /// script
-# requires-python = ">=3.9"
-# dependencies = [
-#   "RealtimeSTT",
-#   "openai",
-#   "python-dotenv",
-#   "rich",
-#   "numpy",
-#   "sounddevice",
-#   "soundfile",
-#   "markdown",
-# ]
-# ///
 
-# Voice-enabled assistant that combines speech recognition, Claude Code, and text-to-speech for voice-controlled programming
+# Voice-enabled assistant that combines speech recognition, Claude Code, and TTS
 
 """
 
@@ -23,12 +10,12 @@
 # Voice to Claude Code
 
 A voice-enabled Claude Code assistant that allows you to interact with Claude Code using voice commands.
-This tool combines RealtimeSTT for speech recognition and OpenAI TTS for speech output.
+This tool combines RealtimeSTT for speech recognition and MeloTTS for speech output.
 
 ## Features
 - Real-time speech recognition using RealtimeSTT
 - Claude Code integration for programmable AI coding
-- Text-to-speech responses using OpenAI TTS
+- Text-to-speech responses using MeloTTS
 - Conversation history tracking
 - Voice trigger activation
 
@@ -38,7 +25,6 @@ This tool combines RealtimeSTT for speech recognition and OpenAI TTS for speech 
 
 
 ## Requirements
-- OpenAI API key (for TTS)
 - Anthropic API key (for Claude Code)
 - Python 3.9+
 - UV package manager (for dependency management)
@@ -55,43 +41,54 @@ For example: "Hey claude, create a simple hello world script"
 Press Ctrl+C to exit.
 """
 
-import os
-import sys
-import json
-import yaml
-import uuid
-import asyncio
-import tempfile
-import subprocess
-import sounddevice as sd
-import soundfile as sf
-import numpy as np
 import argparse
-from typing import List, Dict, Any, Optional, Union
-from pathlib import Path
-from rich.console import Console
-from rich.panel import Panel
-from rich.markdown import Markdown
-from rich.logging import RichHandler
-from rich.syntax import Syntax
-from dotenv import load_dotenv
-import openai
-from openai import OpenAI
-from RealtimeSTT import AudioToTextRecorder
+import asyncio
 import logging
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import pygame
+import yaml
+from dotenv import load_dotenv
+from RealtimeSTT import AudioToTextRecorder
+from rich.console import Console
+from rich.logging import RichHandler
+from rich.markdown import Markdown
+from rich.panel import Panel
+
+# from melo.api import TTS
+# from gtts import gTTS
+# from bark import SAMPLE_RATE, generate_audio, preload_models
+from TTS.api import TTS
+
+# 7/11에 해야할 일. model을 바꾸는 것? 한국어로 대응하고 싶은데
+# 모델을 바꾸니까 한국어 대응은 됬는데, 대답이 시원찮다. 다른 더 좋은 무료 TTS를 사용해야할듯?
+# 로컬 ai모델을 사용하면 되나
+# text compression과 tts모델을 로컬로 바꾼다. MeloTTS로 교체
 
 # Configuration - default values
-TRIGGER_WORDS = ["claude", "cloud", "sonnet", "sonny"]  # List of possible trigger words
-STT_MODEL = "small.en"  # Options: tiny.en, base.en, small.en, medium.en, large-v2
-TTS_VOICE = "nova"  # Options: alloy, echo, fable, onyx, nova, shimmer
+TRIGGER_WORDS = [
+    "X",
+    "익스",
+    "클라우드",
+    "클로드",
+]  # List of possible trigger words
+STT_MODEL = "tiny"  # Options: tiny.en, base.en, small.en, medium.en, large-v2
+TTS_MODEL = "KR"  # MeloTTS Korean model
 DEFAULT_CLAUDE_TOOLS = [
     "Bash",
     "Edit",
     "Write",
-    "GlobTool",
-    "GrepTool",
-    "LSTool",
-    "Replace",
+    "Glob",
+    "Grep",
+    "LS",
+    "Read",
 ]
 
 # Prompt templates
@@ -154,7 +151,7 @@ console = Console()
 load_dotenv()
 
 # Check required environment variables
-required_vars = ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+required_vars = ["ANTHROPIC_API_KEY"]
 missing_vars = [var for var in required_vars if not os.environ.get(var)]
 if missing_vars:
     console.print(
@@ -162,11 +159,6 @@ if missing_vars:
     )
     console.print("Please set these in your .env file or as environment variables.")
     sys.exit(1)
-
-# Initialize OpenAI client for TTS
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
-
 
 
 class ClaudeCodeAssistant:
@@ -197,6 +189,9 @@ class ClaudeCodeAssistant:
 
         # Load existing conversation or start a new one
         self.conversation_history = self.load_conversation_history()
+
+        # Set up TTS model
+        self.setup_tts()
 
         # Set up recorder
         self.setup_recorder()
@@ -236,13 +231,51 @@ class ClaudeCodeAssistant:
                 f"[bold red]Failed to save conversation history: {e}[/bold red]"
             )
 
+    def setup_tts(self):
+        """Set up the Coqui TTS model"""
+        log.info(
+            "Setting up Coqui TTS model (this may take several minutes for first-time download)"
+        )
+
+        try:
+            # Set environment variable to bypass license agreement
+            import os
+
+            os.environ["COQUI_TOS_AGREED"] = "1"
+
+            # Fix PyTorch 2.6 weights_only issue for Coqui TTS
+            import torch
+
+            # Temporarily override torch.load to use weights_only=False for Coqui TTS
+            original_load = torch.load
+            torch.load = lambda *args, **kwargs: original_load(
+                *args, **kwargs, weights_only=False
+            )
+
+            # Initialize Coqui TTS with multilingual model
+            # This will download ~1.87GB model on first run
+            console.print(
+                "[yellow]Downloading Coqui TTS model (~1.87GB)... Please wait.[/yellow]"
+            )
+            self.tts_model = TTS(
+                model_name="tts_models/multilingual/multi-dataset/xtts_v2", gpu=False
+            )
+            log.info("Coqui TTS model initialized successfully")
+            console.print("[green]Coqui TTS model ready![/green]")
+        except Exception as e:
+            log.error(f"Error initializing TTS model: {str(e)}")
+            console.print(
+                f"[bold red]Error initializing TTS model:[/bold red] {str(e)}"
+            )
+            raise
+
     def setup_recorder(self):
         """Set up the RealtimeSTT recorder"""
         log.info(f"Setting up STT recorder with model {STT_MODEL}")
 
         self.recorder = AudioToTextRecorder(
             model=STT_MODEL,
-            language="en",
+            language="ko",
             compute_type="float32",
             post_speech_silence_duration=0.8,
             beam_size=5,
@@ -334,18 +367,8 @@ class ClaudeCodeAssistant:
         log.info("Compressing response for speech...")
 
         try:
-            # Use the prompt template from the constants
-            prompt = COMPRESS_PROMPT.format(text=text)
+            compressed_text = self._simple_compress(text)
 
-            # Call OpenAI with GPT-4.1-mini to compress the text
-            response = client.chat.completions.create(
-                model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=1024,
-            )
-
-            compressed_text = response.choices[0].message.content
             log.info(
                 f"Compressed response from {len(text)} to {len(compressed_text)} characters"
             )
@@ -373,42 +396,77 @@ class ClaudeCodeAssistant:
             # Return original text if compression fails
             return text
 
+    def _simple_compress(self, text: str, max_length: int = 300) -> str:
+        """Simple text compression for speech without using external APIs"""
+
+        # Remove code blocks and replace with simple description
+        text = re.sub(r"```[\s\S]*?```", "[코드가 생성되었습니다]", text)
+
+        # Remove multiple newlines
+        text = re.sub(r"\n\s*\n", "\n", text)
+
+        # Remove excessive whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # If still too long, truncate intelligently
+        if len(text) > max_length:
+            # Try to cut at sentence boundary
+            sentences = text.split(". ")
+            compressed = ""
+            for sentence in sentences:
+                if len(compressed + sentence + ". ") <= max_length - 20:
+                    compressed += sentence + ". "
+                else:
+                    break
+
+            if not compressed.strip():
+                # If no complete sentences fit, just truncate
+                compressed = text[: max_length - 10] + "..."
+            else:
+                compressed = compressed.strip()
+                if not compressed.endswith("."):
+                    compressed += "..."
+
+            return compressed
+
+        return text
+
     async def speak(self, text: str):
-        """Convert text to speech using OpenAI TTS"""
+        """Convert text to speech using Coqui TTS"""
         log.info(f'Speaking: "{text[:50]}..."')
 
         try:
             # Compress text before converting to speech
             compressed_text = await self.compress_speech(text)
 
-            # Generate speech with compressed text
-            response = client.audio.speech.create(
-                model="tts-1",
-                voice=TTS_VOICE,
-                input=compressed_text,
-                speed=1.0,
-            )
-
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-                temp_filename = temp_file.name
-                response.stream_to_file(temp_filename)
-
-            # Play audio
-            data, samplerate = sf.read(temp_filename)
-            sd.play(data, samplerate)
-
             # Log start time for duration tracking
             start_time = asyncio.get_event_loop().time()
 
-            # Wait for audio to finish
-            sd.wait()
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
+                # Generate speech with Coqui TTS multilingual model
+                # XTTS_v2 supports Korean language
+                self.tts_model.tts_to_file(
+                    text=compressed_text,
+                    file_path=tmp_file.name,
+                    language="ko",
+                    speaker="Claribel Dervla",
+                )
 
-            # Calculate speech duration
-            duration = asyncio.get_event_loop().time() - start_time
+                # Initialize pygame mixer
+                pygame.mixer.init()
+                pygame.mixer.music.load(tmp_file.name)
+                pygame.mixer.music.play()
 
-            # Clean up the temporary file
-            os.unlink(temp_filename)
+                # Wait for playback to complete
+                while pygame.mixer.music.get_busy():
+                    await asyncio.sleep(0.1)
+
+                # Calculate speech duration
+                duration = asyncio.get_event_loop().time() - start_time
+
+                # Clean up the temporary file
+                os.unlink(tmp_file.name)
 
             log.info(f"Audio played (duration: {duration:.2f}s)")
 
@@ -441,7 +499,8 @@ class ClaudeCodeAssistant:
             "-p",
             prompt,
             "--allowedTools",
-        ] + DEFAULT_CLAUDE_TOOLS
+            ",".join(DEFAULT_CLAUDE_TOOLS),
+        ]
 
         console.print("\n[bold blue]🔄 Running Claude Code...[/bold blue]")
 
@@ -487,7 +546,7 @@ class ClaudeCodeAssistant:
             Panel.fit(
                 "[bold magenta]🎤 Claude Code Voice Assistant Ready[/bold magenta]\n"
                 f"Speak to interact. Include one of these trigger words to activate: {', '.join(TRIGGER_WORDS)}.\n"
-                f"The assistant will listen, process with Claude Code, and respond using voice '{TTS_VOICE}'.\n"
+                f"The assistant will listen, process with Claude Code, and respond using voice '{TTS_MODEL}'.\n"
                 f"STT model: {STT_MODEL}\n"
                 f"Conversation ID: {self.conversation_id}\n"
                 f"Saving conversation to: {self.conversation_file}\n"
@@ -513,7 +572,8 @@ class ClaudeCodeAssistant:
                 else:
                     # If no trigger word, just continue listening
                     console.print(
-                        f"[yellow]No trigger word detected. Please include one of these words: {', '.join(TRIGGER_WORDS)}. Continuing to listen...[/yellow]"
+                        f"[yellow]No trigger word detected. Please include one of these words: "
+                        f"{', '.join(TRIGGER_WORDS)}. Continuing to listen...[/yellow]"
                     )
 
         except KeyboardInterrupt:
@@ -563,7 +623,8 @@ async def main():
         if assistant.conversation_file.exists():
             log.info(f"Resuming existing conversation with ID: {args.id}")
             console.print(
-                f"[bold green]Resuming conversation {args.id} with {len(assistant.conversation_history)} turns[/bold green]"
+                f"[bold green]Resuming conversation {args.id} with "
+                f"{len(assistant.conversation_history)} turns[/bold green]"
             )
         else:
             log.info(f"Starting new conversation with user-provided ID: {args.id}")
